@@ -1,5 +1,8 @@
 import asyncio
 import shutil
+import threading
+import time
+import wave
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -33,26 +36,87 @@ class InsufficientDiskSpaceError(Exception):
     pass
 
 
-class DiskWaveSink(sinks.WaveSink):
-    """WaveSink that saves each speaker's WAV when recording is finalized.
+class DiskWaveSink(sinks.Sink):
+    """Streams each speaker's audio to disk, time-aligned to the start of the recording.
 
-    In the DAVE-capable py-cord the 'after' callback runs *before* the sink is cleaned up
-    (which is what converts raw PCM to WAV), so persist from cleanup() itself.
+    - Discord sends no packets while someone is silent and this py-cord doesn't pad the gaps,
+      so a speaker's raw stream collapses to just their speech. We insert silence based on
+      wall-clock arrival time, so every speaker's WAV is full-length and the tracks line up
+      (like Craig's), which the transcript merge relies on.
+    - Audio goes straight to disk instead of an in-memory buffer (~0.7 GB/hour/speaker).
+    - Keyed by numeric user ID (py-cord now passes Member objects, or None for streams it
+      hasn't mapped to a user yet; those are dropped).
+    - Files are finalized in cleanup(): in this py-cord the 'after' callback runs before it.
     """
+
+    BYTES_PER_SECOND = SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS
+    FRAME_BYTES = BYTES_PER_SECOND // 50  # 20 ms
+    GAP_THRESHOLD_BYTES = BYTES_PER_SECOND // 10  # ignore gaps/jitter under 100 ms
+    ZEROS_CHUNK = bytes(1024 * 1024)
 
     def __init__(self, output_dir: Path):
         super().__init__()
         self.output_dir = output_dir
         self.saved: dict[int, Path] = {}
+        self._t0 = time.monotonic()
+        self._lock = threading.Lock()
+        self._streams: dict[int, list] = {}  # user_id -> [file, bytes_written]
 
-    def cleanup(self):
-        super().cleanup()  # marks finished and formats each speaker's PCM as WAV
-        for user_id, audio in self.audio_data.items():
-            path = self.output_dir / f"speaker_{user_id}.wav"
-            audio.file.seek(0)
-            path.write_bytes(audio.file.read())
-            self.saved[user_id] = path
-            logger.info("Saved speaker audio", user_id=user_id, file_path=str(path))
+    @property
+    def speaker_count(self) -> int:
+        return len(self._streams)
+
+    def bytes_written(self) -> dict[int, int]:
+        with self._lock:
+            return {uid: st[1] for uid, st in self._streams.items()}
+
+    def _elapsed_bytes(self) -> int:
+        elapsed = int((time.monotonic() - self._t0) * self.BYTES_PER_SECOND)
+        return elapsed - (elapsed % self.FRAME_BYTES)
+
+    def _pad_to(self, stream: list, target: int) -> None:
+        missing = target - stream[1]
+        while missing > 0:
+            chunk = self.ZEROS_CHUNK[: min(missing, len(self.ZEROS_CHUNK))]
+            stream[0].write(chunk)
+            stream[1] += len(chunk)
+            missing -= len(chunk)
+
+    def write(self, data, user) -> None:
+        if user is None or getattr(self, "finished", False):
+            return
+        pcm = getattr(data, "pcm", data)
+        uid = getattr(user, "id", user)
+        with self._lock:
+            stream = self._streams.get(uid)
+            if stream is None:
+                stream = [open(self.output_dir / f"speaker_{uid}.pcm", "wb"), 0]
+                self._streams[uid] = stream
+            # The packet covers the 20 ms ending now; insert silence for any real gap before it
+            start = self._elapsed_bytes() - len(pcm)
+            if start - stream[1] >= self.GAP_THRESHOLD_BYTES:
+                self._pad_to(stream, start)
+            stream[0].write(pcm)
+            stream[1] += len(pcm)
+
+    def cleanup(self) -> None:
+        self.finished = True
+        with self._lock:
+            total = self._elapsed_bytes()
+            for uid, stream in self._streams.items():
+                self._pad_to(stream, total)  # every track ends at the same time
+                stream[0].close()
+                pcm_path = self.output_dir / f"speaker_{uid}.pcm"
+                wav_path = self.output_dir / f"speaker_{uid}.wav"
+                with open(pcm_path, "rb") as src, wave.open(str(wav_path), "wb") as dst:
+                    dst.setnchannels(CHANNELS)
+                    dst.setsampwidth(BYTES_PER_SAMPLE)
+                    dst.setframerate(SAMPLE_RATE)
+                    while chunk := src.read(1024 * 1024):
+                        dst.writeframes(chunk)
+                pcm_path.unlink()
+                self.saved[uid] = wav_path
+                logger.info("Saved speaker audio", user_id=uid, file_path=str(wav_path))
 
 
 @dataclass
@@ -65,7 +129,7 @@ class RecordingSession:
     started_at: datetime
     output_dir: Path
     voice_client: Optional[discord.VoiceClient] = None
-    sink: Optional[sinks.WaveSink] = None
+    sink: Optional[DiskWaveSink] = None
     is_paused: bool = False
     speaker_files: dict[int, Path] = field(default_factory=dict)
     monitor: Optional[asyncio.Task] = None
@@ -218,10 +282,7 @@ class SessionRecorder:
         last: dict[int, int] = {}
         while True:
             await asyncio.sleep(interval)
-            sizes = {
-                uid: audio.file.getbuffer().nbytes
-                for uid, audio in list(session.sink.audio_data.items())
-            }
+            sizes = session.sink.bytes_written()
             grew = {uid: n - last.get(uid, 0) for uid, n in sizes.items()}
             logger.info(
                 "Recording heartbeat",
@@ -231,30 +292,6 @@ class SessionRecorder:
                 kb_last_minute={uid: g // 1024 for uid, g in grew.items()},
             )
             last = sizes
-
-    async def _on_recording_stopped(
-        self,
-        sink: sinks.WaveSink,
-        session: RecordingSession,
-    ):
-        """Callback when recording stops - save audio files."""
-        logger.info("Processing recorded audio", session_id=session.session_id)
-
-        for user_id, audio in sink.audio_data.items():
-            file_path = session.output_dir / f"speaker_{user_id}.wav"
-
-            # Write audio data to file
-            with open(file_path, "wb") as f:
-                audio.file.seek(0)
-                f.write(audio.file.read())
-
-            session.speaker_files[user_id] = file_path
-            logger.info(
-                "Saved speaker audio",
-                session_id=session.session_id,
-                user_id=user_id,
-                file_path=str(file_path),
-            )
 
     async def stop_recording(self, guild_id: int) -> RecordingSession:
         """
@@ -326,11 +363,7 @@ class SessionRecorder:
             raise ValueError("Recording is not paused.")
 
         if session.voice_client and session.sink:
-            session.voice_client.start_recording(
-                session.sink,
-                self._on_recording_stopped,
-                session,
-            )
+            session.voice_client.start_recording(session.sink)
             session.is_paused = False
             logger.info("Recording resumed", session_id=session.session_id)
             return True
@@ -351,7 +384,7 @@ class SessionRecorder:
             "started_at": session.started_at.isoformat(),
             "duration_seconds": int(duration.total_seconds()),
             "is_paused": session.is_paused,
-            "speaker_count": len(session.sink.audio_data) if session.sink else 0,
+            "speaker_count": session.sink.speaker_count if session.sink else 0,
         }
 
     def is_recording(self, guild_id: int) -> bool:
