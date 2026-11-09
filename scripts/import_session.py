@@ -64,11 +64,17 @@ def safe_extract(zip_path: Path, dest: Path) -> None:
         zf.extractall(dest)
 
 
+# Pre-mixed files that sit next to the per-speaker tracks (Craig's merged.wav, or our own
+# merge output). Importing them would duplicate every speaker.
+MIXDOWN_STEMS = {"merged", "mixdown", "mix", "raw"}
+
+
+def is_audio_track(path: Path) -> bool:
+    return path.suffix.lower() in AUDIO_EXTENSIONS and path.stem.lower() not in MIXDOWN_STEMS
+
+
 def find_audio_files(directory: Path) -> list[Path]:
-    return sorted(
-        p for p in directory.rglob("*")
-        if p.is_file() and p.suffix.lower() in AUDIO_EXTENSIONS
-    )
+    return sorted(p for p in directory.rglob("*") if p.is_file() and is_audio_track(p))
 
 
 def main():
@@ -101,8 +107,7 @@ def main():
         if args.dry_run:
             print(f"(dry run) would extract {source} -> {audio_dir}")
             with zipfile.ZipFile(source) as zf:
-                files = [Path(n) for n in zf.namelist()
-                         if Path(n).suffix.lower() in AUDIO_EXTENSIONS]
+                files = [Path(n) for n in zf.namelist() if is_audio_track(Path(n))]
         else:
             if audio_dir.exists() and any(audio_dir.iterdir()):
                 sys.exit(f"{audio_dir} already exists and is not empty; pick another --name")
