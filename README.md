@@ -10,6 +10,25 @@ A Discord bot that records your D&D sessions, transcribes them with speaker iden
 - **Smart Summaries**: Claude AI generates session summaries, extracts NPCs, locations, and key events
 - **Session History**: Browse and search through past sessions
 
+> **Status (Nov 2026):** live voice recording by the bot is unreliable. py-cord cannot yet
+> receive voice under Discord's mandatory DAVE encryption
+> ([py-cord#3139](https://github.com/Pycord-Development/pycord/issues/3139)), and recording
+> can silently stop after a few minutes. Record with [Craig](https://craig.chat) (or locally)
+> and use **Importing recordings** below. The `/dnd start|stop` commands are kept for when
+> upstream is fixed.
+
+## Importing recordings
+
+Export per-speaker audio (Craig's FLAC zip works as-is), then:
+
+```bash
+python scripts/import_session.py path/to/craig-export.zip     --guild-id <server id> --channel-id <text channel id for the report> --name "Session 12"
+```
+
+Use `--dry-run` first to see which tracks would be imported (music bots are excluded by
+`EXCLUDED_NAME_PATTERNS`). Speaker names come from the filenames (`1-Alice.flac` -> `Alice`).
+Make sure the Celery worker is running; the report is posted to the channel when done.
+
 ## Commands
 
 | Command | Description |
