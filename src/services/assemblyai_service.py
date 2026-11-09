@@ -12,6 +12,58 @@ logger = structlog.get_logger()
 aai.settings.api_key = settings.assemblyai_api_key
 
 
+# Split a single speaker's word stream into utterances at pauses, so utterances from
+# different speakers can be interleaved by time.
+PAUSE_SPLIT_MS = 1500
+MAX_UTTERANCE_MS = 30_000
+
+
+def build_utterances(transcript) -> list[dict]:
+    """
+    Utterances (speaker, text, start_ms, end_ms, confidence) for a finished transcript.
+
+    With diarization AssemblyAI returns utterances directly. For single-speaker tracks it
+    returns none, so build them from word timestamps instead of collapsing the whole
+    track into one block.
+    """
+    if transcript.utterances:
+        return [
+            {
+                "speaker": u.speaker,
+                "text": u.text,
+                "start_ms": u.start,
+                "end_ms": u.end,
+                "confidence": u.confidence,
+            }
+            for u in transcript.utterances
+        ]
+
+    utterances: list[dict] = []
+    current: list = []
+
+    def flush():
+        if current:
+            utterances.append({
+                "speaker": None,
+                "text": " ".join(w.text for w in current),
+                "start_ms": current[0].start,
+                "end_ms": current[-1].end,
+                "confidence": sum(w.confidence for w in current) / len(current),
+            })
+            current.clear()
+
+    for word in transcript.words or []:
+        if current:
+            gap = word.start - current[-1].end
+            too_long = word.end - current[0].start > MAX_UTTERANCE_MS
+            sentence_end = current[-1].text.rstrip()[-1:] in ".?!"
+            if gap >= PAUSE_SPLIT_MS or (too_long and sentence_end):
+                flush()
+        current.append(word)
+    flush()
+    return utterances
+
+
 class TranscriptionResult:
     """Wrapper for transcription results."""
 
@@ -112,17 +164,7 @@ class AssemblyAIService:
             logger.error("Transcription failed", error=transcript.error)
             raise Exception(f"Transcription failed: {transcript.error}")
 
-        # Extract utterances with speaker labels
-        utterances = []
-        if transcript.utterances:
-            for utterance in transcript.utterances:
-                utterances.append({
-                    "speaker": utterance.speaker,
-                    "text": utterance.text,
-                    "start_ms": utterance.start,
-                    "end_ms": utterance.end,
-                    "confidence": utterance.confidence,
-                })
+        utterances = build_utterances(transcript)
 
         logger.info(
             "Transcription completed",

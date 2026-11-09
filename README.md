@@ -98,10 +98,13 @@ REDIS_URL=redis://localhost:6379/0
 
 ## Cost Estimates
 
-Per 3-hour session:
-- AssemblyAI transcription: ~$0.45
-- Claude analysis: ~$0.20
-- **Total: ~$0.65 per session**
+Transcription is billed per speaker track, and each Craig track runs the full length of the
+session (silence included), so cost scales with speakers x session length.
+
+Measured on a 2h10m session with 5 speakers:
+- AssemblyAI transcription: ~$1.62 (10.8 audio-hours at ~$0.15/hr)
+- Claude analysis (Sonnet 5.5): ~$0.14
+- **Total: ~$1.75 per session**
 
 ## Architecture
 

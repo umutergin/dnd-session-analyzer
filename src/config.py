@@ -1,4 +1,6 @@
-from pydantic_settings import BaseSettings
+from typing import Annotated
+
+from pydantic_settings import BaseSettings, NoDecode
 from pydantic import Field, field_validator
 from pathlib import Path
 
@@ -31,9 +33,9 @@ class Settings(BaseSettings):
     # Skip recording audio from Discord bots (music bots, etc.)
     exclude_bots_from_recording: bool = Field(default=True)
     # Additional user IDs to exclude (comma-separated in .env)
-    excluded_user_ids: list[int] = Field(default_factory=list)
+    excluded_user_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     # Name patterns to exclude (case-insensitive, comma-separated)
-    excluded_name_patterns: list[str] = Field(
+    excluded_name_patterns: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [
             "rythm", "groovy", "fredboat", "hydra", "jockie",
             "musicbox", "matchbox", "mee6", "dyno", "carl-bot",

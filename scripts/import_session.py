@@ -100,6 +100,7 @@ def main():
     from src.config import settings
 
     # Work out where the audio lives. Zips are extracted into managed storage.
+    copy_map: dict[Path, Path] = {}
     if source.is_file():
         if source.suffix.lower() != ".zip":
             sys.exit("Source must be a directory or a .zip file")
@@ -118,8 +119,12 @@ def main():
                 sys.exit(f"Could not extract {source.name}: {exc}")
             files = find_audio_files(audio_dir)
     else:
-        audio_dir = source
-        files = find_audio_files(audio_dir)
+        # Copy tracks into managed storage: the pipeline writes its own merged.wav into the
+        # session's audio folder, which must never be the user's original export folder.
+        src_files = find_audio_files(source)
+        audio_dir = settings.audio_storage_path / re.sub(r"[^\w.-]+", "_", name)
+        files = [audio_dir / f.name for f in src_files]
+        copy_map = {dst: src for dst, src in zip(files, src_files)}
 
     if not files:
         sys.exit("No audio files found")
