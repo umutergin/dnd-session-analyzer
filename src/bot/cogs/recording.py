@@ -1,3 +1,5 @@
+import os
+
 import discord
 from discord.ext import commands
 from datetime import datetime
@@ -216,7 +218,10 @@ class Recording(commands.Cog):
                         await db.commit()
 
                 # Trigger async processing pipeline
-                process_session.delay(str(db_session_id))
+                if os.environ.get("DND_SKIP_PROCESSING"):
+                    logger.warning("DND_SKIP_PROCESSING set: not queuing processing")
+                else:
+                    process_session.delay(str(db_session_id))
 
             # Create success embed
             embed = discord.Embed(

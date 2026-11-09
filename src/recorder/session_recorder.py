@@ -10,6 +10,16 @@ import structlog
 
 logger = structlog.get_logger()
 
+# EXPERIMENT (py-cord PR #3159 / issue #3388): UDPKeepAlive.delay is 5000 but is passed to
+# time.sleep(), i.e. seconds, so after the first packet no keepalive is sent for ~83 minutes
+# and Discord stops delivering voice. Send one every 5 seconds instead.
+try:
+    from discord.voice.receive import reader as _voice_reader
+
+    _voice_reader.UDPKeepAlive.delay = 5
+except Exception:  # older py-cord without this module
+    pass
+
 # Audio storage constants for disk space calculation
 SAMPLE_RATE = 48000  # 48kHz
 BYTES_PER_SAMPLE = 2  # 16-bit audio
@@ -21,6 +31,28 @@ DISK_BUFFER_MULTIPLIER = 1.5  # 50% buffer for safety
 class InsufficientDiskSpaceError(Exception):
     """Raised when there's not enough disk space for recording."""
     pass
+
+
+class DiskWaveSink(sinks.WaveSink):
+    """WaveSink that saves each speaker's WAV when recording is finalized.
+
+    In the DAVE-capable py-cord the 'after' callback runs *before* the sink is cleaned up
+    (which is what converts raw PCM to WAV), so persist from cleanup() itself.
+    """
+
+    def __init__(self, output_dir: Path):
+        super().__init__()
+        self.output_dir = output_dir
+        self.saved: dict[int, Path] = {}
+
+    def cleanup(self):
+        super().cleanup()  # marks finished and formats each speaker's PCM as WAV
+        for user_id, audio in self.audio_data.items():
+            path = self.output_dir / f"speaker_{user_id}.wav"
+            audio.file.seek(0)
+            path.write_bytes(audio.file.read())
+            self.saved[user_id] = path
+            logger.info("Saved speaker audio", user_id=user_id, file_path=str(path))
 
 
 @dataclass
@@ -36,6 +68,7 @@ class RecordingSession:
     sink: Optional[sinks.WaveSink] = None
     is_paused: bool = False
     speaker_files: dict[int, Path] = field(default_factory=dict)
+    monitor: Optional[asyncio.Task] = None
 
 
 class SessionRecorder:
@@ -157,7 +190,7 @@ class SessionRecorder:
         voice_client = await voice_channel.connect()
 
         # Create WAV sink for recording
-        sink = sinks.WaveSink()
+        sink = DiskWaveSink(output_dir)
 
         # Create session object
         session = RecordingSession(
@@ -174,14 +207,30 @@ class SessionRecorder:
         self.active_sessions[guild_id] = session
 
         # Start recording with callback
-        voice_client.start_recording(
-            sink,
-            self._on_recording_stopped,
-            session,
-        )
+        voice_client.start_recording(sink)
+        session.monitor = asyncio.create_task(self._monitor(session))
 
         logger.info("Recording started", session_id=session_id)
         return session
+
+    async def _monitor(self, session: RecordingSession, interval: int = 60):
+        """Log bytes received per speaker every minute so a receive stall is visible."""
+        last: dict[int, int] = {}
+        while True:
+            await asyncio.sleep(interval)
+            sizes = {
+                uid: audio.file.getbuffer().nbytes
+                for uid, audio in list(session.sink.audio_data.items())
+            }
+            grew = {uid: n - last.get(uid, 0) for uid, n in sizes.items()}
+            logger.info(
+                "Recording heartbeat",
+                session_id=session.session_id,
+                connected=bool(session.voice_client and session.voice_client.is_connected()),
+                receiving=any(g > 0 for g in grew.values()),
+                kb_last_minute={uid: g // 1024 for uid, g in grew.items()},
+            )
+            last = sizes
 
     async def _on_recording_stopped(
         self,
@@ -228,8 +277,12 @@ class SessionRecorder:
         logger.info("Stopping recording", session_id=session.session_id)
 
         # Stop recording (triggers callback)
+        if session.monitor:
+            session.monitor.cancel()
         if session.voice_client and session.voice_client.is_connected():
+            # Synchronous: finalizes the sink, which writes the speaker files
             session.voice_client.stop_recording()
+            session.speaker_files = dict(session.sink.saved)
             await session.voice_client.disconnect()
 
         # Remove from active sessions

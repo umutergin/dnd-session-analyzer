@@ -71,7 +71,9 @@ class DnDRecorderBot(commands.Bot):
         after: discord.VoiceState,
     ):
         """Handle voice state changes (e.g., disconnect if alone)."""
-        # Get the recording cog to check if we're recording
+        # EXPERIMENT: auto-stop disabled. It miscounts members without the members intent and
+        # skips the DB/processing steps; fix properly before re-enabling.
+        return
         recording_cog = self.get_cog("Recording")
         if not recording_cog:
             return
