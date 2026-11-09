@@ -113,6 +113,9 @@ class SessionAudioTrack(Base):
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
     duration_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     file_size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    # True for a pre-mixed recording containing several speakers: transcribe with speaker
+    # diarization instead of attributing the whole track to one person.
+    diarize: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     # Relationships

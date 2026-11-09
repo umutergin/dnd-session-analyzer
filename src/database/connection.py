@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from src.config import settings
@@ -66,6 +66,11 @@ async def init_db():
     """Initialize the database by creating all tables."""
     async with async_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all doesn't alter existing tables; add columns introduced after first release.
+        await conn.execute(text(
+            "ALTER TABLE session_audio_tracks "
+            "ADD COLUMN IF NOT EXISTS diarize BOOLEAN NOT NULL DEFAULT false"
+        ))
 
 
 async def close_db():

@@ -236,6 +236,7 @@ def transcribe_speaker(self, track_id: str) -> dict:
 
         username = track.discord_username or f"User_{track.discord_user_id}"
         file_path = track.file_path
+        diarize = bool(track.diarize)
 
     # Transcribe
     service = AssemblyAIService()
@@ -243,13 +244,17 @@ def transcribe_speaker(self, track_id: str) -> dict:
     try:
         result = service.transcribe_file(
             Path(file_path),
-            speaker_labels=False,  # Single speaker per file
+            speaker_labels=diarize,  # Single speaker per file unless it's a pre-mixed track
         )
 
         utterances = []
         if result.utterances:
             for utt in result.utterances:
-                utt["speaker"] = username
+                if not diarize:
+                    utt["speaker"] = username
+                else:
+                    # Diarization labels are anonymous (A, B, ...); keep them distinct
+                    utt["speaker"] = f"Speaker {utt['speaker']}"
                 utterances.append(utt)
         elif result.text:
             utterances.append({
