@@ -10,6 +10,26 @@ A Discord bot that records your D&D sessions, transcribes them with speaker iden
 - **Smart Summaries**: Claude AI generates session summaries, extracts NPCs, locations, and key events
 - **Session History**: Browse and search through past sessions
 
+> **Status (Nov 2026):** live recording works again on an unmerged py-cord build
+> ([PR #3159](https://github.com/Pycord-Development/pycord/pull/3159), DAVE receive support),
+> pinned in `pyproject.toml`. Tested: 2 h 45 min with two simultaneous speakers (one simulated
+> with `scripts/voice_player.py`), pause/resume, and auto-stop. Not yet tested with several real
+> people talking over each other. Recording by Craig plus **Importing recordings** below remains
+> a good fallback.
+
+
+## Importing recordings
+
+Export per-speaker audio (Craig's FLAC zip works as-is), then:
+
+```bash
+python scripts/import_session.py path/to/craig-export.zip     --guild-id <server id> --channel-id <text channel id for the report> --name "Session 12"
+```
+
+Use `--dry-run` first to see which tracks would be imported (music bots are excluded by
+`EXCLUDED_NAME_PATTERNS`). Speaker names come from the filenames (`1-Alice.flac` -> `Alice`).
+Make sure the Celery worker is running; the report is posted to the channel when done.
+
 ## Commands
 
 | Command | Description |
@@ -79,10 +99,13 @@ REDIS_URL=redis://localhost:6379/0
 
 ## Cost Estimates
 
-Per 3-hour session:
-- AssemblyAI transcription: ~$0.45
-- Claude analysis: ~$0.20
-- **Total: ~$0.65 per session**
+Transcription is billed per speaker track, and each Craig track runs the full length of the
+session (silence included), so cost scales with speakers x session length.
+
+Measured on a 2h10m session with 5 speakers:
+- AssemblyAI transcription: ~$1.62 (10.8 audio-hours at ~$0.15/hr)
+- Claude analysis (Sonnet 5.5): ~$0.14
+- **Total: ~$1.75 per session**
 
 ## Architecture
 

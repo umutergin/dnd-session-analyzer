@@ -9,9 +9,15 @@ logger = structlog.get_logger()
 
 
 # Prompt for session summary generation
-SESSION_SUMMARY_SYSTEM = """You are a D&D session analyst. Your job is to read session transcripts and extract structured information.
+SESSION_SUMMARY_SYSTEM = """You are a D&D session analyst. Your job is to read session transcripts and extract structured information about the GAME.
 
-You will receive a transcript with speaker labels (labeled as Speaker A, Speaker B, etc., where one speaker is typically the DM/GM describing scenes and others are players).
+You will receive a transcript with speaker labels (labeled as Speaker A, Speaker B, etc., or by player name; one speaker is typically the DM/GM describing scenes and others are players). The transcript is automatic speech recognition output: expect misheard words, garbled names and no punctuation care. Do not guess identities you cannot support.
+
+## Language
+First decide which language the players mostly speak (for example Turkish or English). Write EVERY free-text field of your answer (summaries, descriptions, outcomes, significance notes) in that language. Players often mix in English game terms; keep these in their original English form, as the table does, and never translate them: dice and rolls (d20, d6, natural 20, advantage, disadvantage), mechanics (spell attack, saving throw, save DC, AC, HP, initiative, proficiency, concentration, short rest, long rest), and spell, monster, item, class and feat names (Fireball, Hold Person, Rogue, Sneak Attack). Do not translate or alter proper names of characters, NPCs and places. Write natural grammar in the chosen language around the English terms (for Turkish, for example, "Fireball büyüsü", "save DC 15", "d20 attı").
+
+## Scope: the game only
+Include only what happened in the game: the story and the fiction, in-character dialogue, exploration, social scenes, combat, loot, quests, and rules rulings that actually affected what happened. Leave out everything else, and do not mention that it was left out: real-life conversation (family, work, school, food, news, jokes unrelated to the game), scheduling, breaks, tech problems, and general banter. If a stretch of the transcript is out-of-game talk, ignore it completely. If you cannot tell whether something happened in the game, omit it unless it clearly changed the game state.
 
 Respond ONLY with valid JSON matching the schema provided. Do not include any text outside the JSON."""
 
@@ -19,18 +25,20 @@ SESSION_SUMMARY_USER = """## Session Transcript
 {transcript}
 
 ## Task
-Analyze this D&D session transcript and extract:
+Analyze this D&D session transcript and extract the following (game content only, in the table's language, keeping English game terms as described):
 
-1. **Session Summary**: 2-3 sentence overview
-2. **Detailed Summary**: Narrative paragraph (200-400 words)
-3. **Key Events**: Major plot points, discoveries, decisions
-4. **Combat Encounters**: Battles that occurred (if any)
-5. **NPCs Mentioned**: Characters that appeared or were mentioned
-6. **Locations Mentioned**: Places visited or referenced
+1. **Language**: the language the players mostly speak (ISO 639-1 code, e.g. "tr" or "en")
+2. **Session Summary**: 2-3 sentence overview
+3. **Detailed Summary**: Narrative paragraph (200-400 words)
+4. **Key Events**: Major plot points, discoveries, decisions
+5. **Combat Encounters**: Battles that occurred (if any)
+6. **NPCs Mentioned**: Characters that appeared or were mentioned
+7. **Locations Mentioned**: Places visited or referenced
 
 ## Response Schema
 ```json
 {{
+  "language": "tr",
   "short_summary": "2-3 sentence overview",
   "detailed_summary": "Full narrative summary paragraph",
   "key_events": [
@@ -43,7 +51,7 @@ Analyze this D&D session transcript and extract:
   "combat_encounters": [
     {{
       "enemies": ["Enemy names"],
-      "outcome": "victory, defeat, fled, or negotiated",
+      "outcome": "victory, defeat, fled, or negotiated (in the table's language)",
       "notable_moments": ["Notable things that happened"]
     }}
   ],
@@ -98,7 +106,7 @@ class ClaudeService:
 
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        self.default_model = "claude-sonnet-4-20250514"
+        self.default_model = "claude-sonnet-5-5"
 
     def analyze_session(
         self,
@@ -133,10 +141,14 @@ class ClaudeService:
             )
             transcript = transcript[:max_chars] + "\n\n[Transcript truncated due to length]"
 
-        # Call Claude API
-        message = self.client.messages.create(
+        # Call Claude API. Sonnet 5.5 always thinks, and thinking tokens count against
+        # max_tokens, so leave generous headroom for the JSON answer. Streaming avoids HTTP
+        # timeouts on long transcripts.
+        # server-side fallback: if a safety classifier declines, the API re-runs the request
+        # on a fallback model within the same call (D&D combat text can trip classifiers).
+        with self.client.beta.messages.stream(
             model=model,
-            max_tokens=4096,
+            max_tokens=32000,
             system=SESSION_SUMMARY_SYSTEM,
             messages=[
                 {
@@ -144,10 +156,18 @@ class ClaudeService:
                     "content": SESSION_SUMMARY_USER.format(transcript=transcript),
                 }
             ],
-        )
+            betas=["server-side-fallback-2026-07-01"],
+            extra_body={"fallbacks": "default"},
+        ) as stream:
+            message = stream.get_final_message()
 
-        # Parse response
-        response_text = message.content[0].text
+        if message.stop_reason == "refusal":
+            raise ValueError(f"Claude declined to analyze the transcript: {message.stop_details}")
+        if message.stop_reason == "max_tokens":
+            raise ValueError("Claude's response was cut off (max_tokens); raise the limit")
+
+        # Parse response: content may start with a thinking block, so join the text blocks
+        response_text = "".join(b.text for b in message.content if b.type == "text")
 
         try:
             # Try to extract JSON from the response
@@ -164,6 +184,7 @@ class ClaudeService:
 
         logger.info(
             "Session analysis completed",
+            language=result.get("language"),
             prompt_tokens=message.usage.input_tokens,
             completion_tokens=message.usage.output_tokens,
         )
@@ -191,7 +212,7 @@ class ClaudeService:
         Returns:
             Estimated cost in USD
         """
-        # Claude Sonnet pricing: $3/M input, $15/M output
-        input_cost = (prompt_tokens / 1_000_000) * 3.0
-        output_cost = (completion_tokens / 1_000_000) * 15.0
+        # Claude Sonnet 5.5 pricing: $2/M input, $10/M output
+        input_cost = (prompt_tokens / 1_000_000) * 2.0
+        output_cost = (completion_tokens / 1_000_000) * 10.0
         return input_cost + output_cost
