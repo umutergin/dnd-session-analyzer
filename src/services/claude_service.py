@@ -9,9 +9,15 @@ logger = structlog.get_logger()
 
 
 # Prompt for session summary generation
-SESSION_SUMMARY_SYSTEM = """You are a D&D session analyst. Your job is to read session transcripts and extract structured information.
+SESSION_SUMMARY_SYSTEM = """You are a D&D session analyst. Your job is to read session transcripts and extract structured information about the GAME.
 
-You will receive a transcript with speaker labels (labeled as Speaker A, Speaker B, etc., where one speaker is typically the DM/GM describing scenes and others are players).
+You will receive a transcript with speaker labels (labeled as Speaker A, Speaker B, etc., or by player name; one speaker is typically the DM/GM describing scenes and others are players). The transcript is automatic speech recognition output: expect misheard words, garbled names and no punctuation care. Do not guess identities you cannot support.
+
+## Language
+First decide which language the players mostly speak (for example Turkish or English). Write EVERY free-text field of your answer (summaries, descriptions, outcomes, significance notes) in that language. Players often mix in English game terms; keep these in their original English form, as the table does, and never translate them: dice and rolls (d20, d6, natural 20, advantage, disadvantage), mechanics (spell attack, saving throw, save DC, AC, HP, initiative, proficiency, concentration, short rest, long rest), and spell, monster, item, class and feat names (Fireball, Hold Person, Rogue, Sneak Attack). Do not translate or alter proper names of characters, NPCs and places. Write natural grammar in the chosen language around the English terms (for Turkish, for example, "Fireball büyüsü", "save DC 15", "d20 attı").
+
+## Scope: the game only
+Include only what happened in the game: the story and the fiction, in-character dialogue, exploration, social scenes, combat, loot, quests, and rules rulings that actually affected what happened. Leave out everything else, and do not mention that it was left out: real-life conversation (family, work, school, food, news, jokes unrelated to the game), scheduling, breaks, tech problems, and general banter. If a stretch of the transcript is out-of-game talk, ignore it completely. If you cannot tell whether something happened in the game, omit it unless it clearly changed the game state.
 
 Respond ONLY with valid JSON matching the schema provided. Do not include any text outside the JSON."""
 
@@ -19,18 +25,20 @@ SESSION_SUMMARY_USER = """## Session Transcript
 {transcript}
 
 ## Task
-Analyze this D&D session transcript and extract:
+Analyze this D&D session transcript and extract the following (game content only, in the table's language, keeping English game terms as described):
 
-1. **Session Summary**: 2-3 sentence overview
-2. **Detailed Summary**: Narrative paragraph (200-400 words)
-3. **Key Events**: Major plot points, discoveries, decisions
-4. **Combat Encounters**: Battles that occurred (if any)
-5. **NPCs Mentioned**: Characters that appeared or were mentioned
-6. **Locations Mentioned**: Places visited or referenced
+1. **Language**: the language the players mostly speak (ISO 639-1 code, e.g. "tr" or "en")
+2. **Session Summary**: 2-3 sentence overview
+3. **Detailed Summary**: Narrative paragraph (200-400 words)
+4. **Key Events**: Major plot points, discoveries, decisions
+5. **Combat Encounters**: Battles that occurred (if any)
+6. **NPCs Mentioned**: Characters that appeared or were mentioned
+7. **Locations Mentioned**: Places visited or referenced
 
 ## Response Schema
 ```json
 {{
+  "language": "tr",
   "short_summary": "2-3 sentence overview",
   "detailed_summary": "Full narrative summary paragraph",
   "key_events": [
@@ -43,7 +51,7 @@ Analyze this D&D session transcript and extract:
   "combat_encounters": [
     {{
       "enemies": ["Enemy names"],
-      "outcome": "victory, defeat, fled, or negotiated",
+      "outcome": "victory, defeat, fled, or negotiated (in the table's language)",
       "notable_moments": ["Notable things that happened"]
     }}
   ],
@@ -176,6 +184,7 @@ class ClaudeService:
 
         logger.info(
             "Session analysis completed",
+            language=result.get("language"),
             prompt_tokens=message.usage.input_tokens,
             completion_tokens=message.usage.output_tokens,
         )
