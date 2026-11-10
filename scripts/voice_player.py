@@ -30,6 +30,12 @@ if not token:
 if not args.file.is_file():
     sys.exit(f"Not found: {args.file}")
 
+try:  # same keepalive workaround the recorder uses (py-cord issue #3388)
+    from discord.voice.receive import reader as _voice_reader
+    _voice_reader.UDPKeepAlive.delay = 5
+except Exception:
+    pass
+
 bot = discord.Bot(intents=discord.Intents.default())
 
 
@@ -39,6 +45,14 @@ async def on_ready():
     vc = await channel.connect()
     print(f"[{bot.user}] joined {channel.name}", flush=True)
     await asyncio.sleep(args.start_delay)
+    async def heartbeat():
+        import time
+        t0 = time.monotonic()
+        while True:
+            await asyncio.sleep(60)
+            print(f"[{bot.user}] t={int(time.monotonic()-t0)}s connected={vc.is_connected()} "
+                  f"playing={vc.is_playing()} paused={vc.is_paused()} latency={vc.latency:.3f}", flush=True)
+    asyncio.create_task(heartbeat())
     while True:
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
