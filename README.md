@@ -10,12 +10,13 @@ A Discord bot that records your D&D sessions, transcribes them with speaker iden
 - **Smart Summaries**: Claude AI generates session summaries, extracts NPCs, locations, and key events
 - **Session History**: Browse and search through past sessions
 
-> **Status (Nov 2026):** live voice recording by the bot is unreliable. py-cord cannot yet
-> receive voice under Discord's mandatory DAVE encryption
-> ([py-cord#3139](https://github.com/Pycord-Development/pycord/issues/3139)), and recording
-> can silently stop after a few minutes. Record with [Craig](https://craig.chat) (or locally)
-> and use **Importing recordings** below. The `/dnd start|stop` commands are kept for when
-> upstream is fixed.
+> **Status (Nov 2026):** live recording works again on an unmerged py-cord build
+> ([PR #3159](https://github.com/Pycord-Development/pycord/pull/3159), DAVE receive support),
+> pinned in `pyproject.toml`. Tested: 2 h 45 min with two simultaneous speakers (one simulated
+> with `scripts/voice_player.py`), pause/resume, and auto-stop. Not yet tested with several real
+> people talking over each other. Recording by Craig plus **Importing recordings** below remains
+> a good fallback.
+
 
 ## Importing recordings
 
