@@ -1,4 +1,6 @@
 import assemblyai as aai
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Optional
 import structlog
@@ -10,6 +12,36 @@ logger = structlog.get_logger()
 
 # Configure AssemblyAI
 aai.settings.api_key = settings.assemblyai_api_key
+
+
+# Files bigger than this are compressed before upload. Raw 48 kHz stereo WAV from the live
+# recorder is ~1.9 GB per speaker for a 2.5 h session, and uploads of that size drop mid-way.
+COMPRESS_ABOVE_BYTES = 100 * 1024 * 1024
+
+
+def compress_for_upload(path: Path) -> Optional[Path]:
+    """Mono 16 kHz FLAC copy of a large file (speech recognition doesn't need more).
+
+    Returns the temp file path, or None if the file is small enough / ffmpeg failed
+    (callers then upload the original). AssemblyAI bills by duration, so this is free.
+    """
+    if path.stat().st_size <= COMPRESS_ABOVE_BYTES:
+        return None
+    fd, tmp = tempfile.mkstemp(suffix=".flac")
+    import os
+    os.close(fd)
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+         "-ac", "1", "-ar", "16000", "-c:a", "flac", tmp],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        logger.warning("Audio compression failed; uploading original", error=result.stderr[-300:])
+        Path(tmp).unlink(missing_ok=True)
+        return None
+    logger.info("Compressed audio for upload", original_mb=path.stat().st_size // 2**20,
+                compressed_mb=Path(tmp).stat().st_size // 2**20)
+    return Path(tmp)
 
 
 # Split a single speaker's word stream into utterances at pauses, so utterances from
@@ -158,7 +190,12 @@ class AssemblyAIService:
         config = aai.TranscriptionConfig(**config_kwargs)
 
         # Transcribe
-        transcript = self.transcriber.transcribe(str(audio_path), config=config)
+        compressed = compress_for_upload(Path(audio_path))
+        try:
+            transcript = self.transcriber.transcribe(str(compressed or audio_path), config=config)
+        finally:
+            if compressed:
+                compressed.unlink(missing_ok=True)
 
         if transcript.status == aai.TranscriptStatus.error:
             logger.error("Transcription failed", error=transcript.error)
