@@ -145,6 +145,76 @@ class Recording(commands.Cog):
                 ephemeral=True,
             )
 
+    async def finalize_recording(self, guild: discord.Guild):
+        """Stop recording, save track rows and queue processing.
+
+        Shared by `/dnd stop` and the auto-stop when everyone leaves.
+        Returns (recording_session, duration, included_count, excluded_count).
+        """
+        recording_session = await self.recorder.stop_recording(guild.id)
+
+        # Calculate duration
+        duration = datetime.now() - recording_session.started_at
+
+        # Update database record
+        db_session_id = self._session_db_ids.pop(guild.id, None)
+        excluded_count = 0
+        included_count = 0
+
+        if db_session_id:
+            async with AsyncSessionLocal() as db:
+                db_session = await db.get(Session, db_session_id)
+                if db_session:
+                    db_session.ended_at = datetime.now()
+                    db_session.duration_seconds = int(duration.total_seconds())
+                    db_session.status = "processing"
+
+                    # Add audio track records with Discord usernames
+                    for user_id, file_path in recording_session.speaker_files.items():
+                        # Get Discord member
+                        member = guild.get_member(user_id)
+                        username = member.display_name if member else f"User_{user_id}"
+
+                        # Check if user should be excluded (bot, music bot, etc.)
+                        is_excluded, exclude_reason = should_exclude_user(member, user_id)
+
+                        if is_excluded:
+                            excluded_count += 1
+                            logger.info(
+                                "Excluding user from transcription",
+                                user_id=user_id,
+                                username=username,
+                                reason=exclude_reason,
+                            )
+                            continue  # Skip adding this track
+
+                        track = SessionAudioTrack(
+                            session_id=db_session_id,
+                            discord_user_id=user_id,
+                            discord_username=username,
+                            file_path=str(file_path),
+                        )
+                        db.add(track)
+                        included_count += 1
+
+                    if excluded_count > 0:
+                        logger.info(
+                            "Excluded users from processing",
+                            excluded_count=excluded_count,
+                            included_count=included_count,
+                            session_id=str(db_session_id),
+                        )
+
+                    await db.commit()
+
+            # Trigger async processing pipeline
+            if os.environ.get("DND_SKIP_PROCESSING"):
+                logger.warning("DND_SKIP_PROCESSING set: not queuing processing")
+            else:
+                process_session.delay(str(db_session_id))
+
+        return recording_session, duration, included_count, excluded_count
+
     @dnd.command(name="stop", description="Stop recording the D&D session")
     async def stop_recording(self, ctx: discord.ApplicationContext):
         """Stop the current recording session."""
@@ -158,70 +228,12 @@ class Recording(commands.Cog):
         await ctx.defer()
 
         try:
-            recording_session = await self.recorder.stop_recording(ctx.guild_id)
-
-            # Calculate duration
-            duration = datetime.now() - recording_session.started_at
+            recording_session, duration, included_count, excluded_count = (
+                await self.finalize_recording(ctx.guild)
+            )
             hours, remainder = divmod(int(duration.total_seconds()), 3600)
             minutes, seconds = divmod(remainder, 60)
             duration_str = f"{hours}h {minutes}m {seconds}s"
-
-            # Update database record
-            db_session_id = self._session_db_ids.pop(ctx.guild_id, None)
-            excluded_count = 0
-            included_count = 0
-
-            if db_session_id:
-                async with AsyncSessionLocal() as db:
-                    db_session = await db.get(Session, db_session_id)
-                    if db_session:
-                        db_session.ended_at = datetime.now()
-                        db_session.duration_seconds = int(duration.total_seconds())
-                        db_session.status = "processing"
-
-                        # Add audio track records with Discord usernames
-                        for user_id, file_path in recording_session.speaker_files.items():
-                            # Get Discord member
-                            member = ctx.guild.get_member(user_id)
-                            username = member.display_name if member else f"User_{user_id}"
-
-                            # Check if user should be excluded (bot, music bot, etc.)
-                            is_excluded, exclude_reason = should_exclude_user(member, user_id)
-
-                            if is_excluded:
-                                excluded_count += 1
-                                logger.info(
-                                    "Excluding user from transcription",
-                                    user_id=user_id,
-                                    username=username,
-                                    reason=exclude_reason,
-                                )
-                                continue  # Skip adding this track
-
-                            track = SessionAudioTrack(
-                                session_id=db_session_id,
-                                discord_user_id=user_id,
-                                discord_username=username,
-                                file_path=str(file_path),
-                            )
-                            db.add(track)
-                            included_count += 1
-
-                        if excluded_count > 0:
-                            logger.info(
-                                "Excluded users from processing",
-                                excluded_count=excluded_count,
-                                included_count=included_count,
-                                session_id=str(db_session_id),
-                            )
-
-                        await db.commit()
-
-                # Trigger async processing pipeline
-                if os.environ.get("DND_SKIP_PROCESSING"):
-                    logger.warning("DND_SKIP_PROCESSING set: not queuing processing")
-                else:
-                    process_session.delay(str(db_session_id))
 
             # Create success embed
             embed = discord.Embed(

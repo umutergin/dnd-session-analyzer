@@ -17,6 +17,8 @@ structlog.configure(
 
 logger = structlog.get_logger()
 
+AUTO_STOP_GRACE_SECONDS = 120
+
 
 class DnDRecorderBot(commands.Bot):
     """Discord bot for recording and summarizing D&D sessions."""
@@ -34,6 +36,8 @@ class DnDRecorderBot(commands.Bot):
             # Debug guilds for instant slash command sync (remove in production)
             debug_guilds=[940893054888472586],
         )
+
+        self._auto_stop_tasks: dict[int, asyncio.Task] = {}
 
         # Load cogs
         logger.info("Loading cogs...")
@@ -71,30 +75,67 @@ class DnDRecorderBot(commands.Bot):
         after: discord.VoiceState,
     ):
         """Handle voice state changes (e.g., disconnect if alone)."""
-        # EXPERIMENT: auto-stop disabled. It miscounts members without the members intent and
-        # skips the DB/processing steps; fix properly before re-enabling.
-        return
+        guild = member.guild
         recording_cog = self.get_cog("Recording")
-        if not recording_cog:
+        if not recording_cog or not recording_cog.recorder.is_recording(guild.id):
             return
+        if member.id == self.user.id:
+            return  # our own state changes (e.g. the disconnect after stopping)
 
-        # If the bot is in a voice channel
-        if self.user and member.guild.voice_client:
-            voice_client = member.guild.voice_client
-            channel = voice_client.channel
+        if self._humans_in_voice(guild) == 0:
+            if guild.id not in self._auto_stop_tasks:
+                logger.info("Voice channel empty, auto-stop pending",
+                            grace_seconds=AUTO_STOP_GRACE_SECONDS, guild_id=guild.id)
+                self._auto_stop_tasks[guild.id] = asyncio.create_task(self._auto_stop(guild))
+        else:
+            task = self._auto_stop_tasks.pop(guild.id, None)
+            if task:
+                task.cancel()
 
-            # If we're the only one left in the channel (excluding bots)
+    def _humans_in_voice(self, guild: discord.Guild) -> int:
+        """People in the recording channel, not counting this bot or known bots.
+
+        Uses voice state ids because member objects may not be cached without the members
+        intent; an id we can't resolve counts as a person.
+        """
+        vc = guild.voice_client
+        if not vc or not vc.channel:
+            return 0
+        count = 0
+        for user_id in vc.channel.voice_states:
+            if user_id == self.user.id:
+                continue
+            m = guild.get_member(user_id)
+            if m is None or not m.bot:
+                count += 1
+        return count
+
+    async def _auto_stop(self, guild: discord.Guild):
+        """After a grace period with nobody present, finish the recording like /dnd stop."""
+        try:
+            await asyncio.sleep(AUTO_STOP_GRACE_SECONDS)
+            cog = self.get_cog("Recording")
+            if not cog.recorder.is_recording(guild.id) or self._humans_in_voice(guild) > 0:
+                return
+            logger.warning("Everyone left the voice channel, stopping recording",
+                           guild_id=guild.id)
+            session, duration, included, _ = await cog.finalize_recording(guild)
+            channel = guild.get_channel(session.channel_id)
             if channel:
-                human_members = [m for m in channel.members if not m.bot]
-                if len(human_members) == 0:
-                    logger.warning(
-                        "All users left voice channel, stopping recording",
-                        guild_id=member.guild.id,
+                try:
+                    await channel.send(
+                        "Everyone left, so I stopped recording "
+                        f"({int(duration.total_seconds() // 60)} min, {included} speaker(s)). "
+                        "Processing has started."
                     )
-                    # Auto-stop recording if everyone leaves
-                    if recording_cog.recorder.is_recording(member.guild.id):
-                        await recording_cog.recorder.stop_recording(member.guild.id)
-                        await voice_client.disconnect()
+                except discord.DiscordException:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("Auto-stop failed", error=str(e), guild_id=guild.id)
+        finally:
+            self._auto_stop_tasks.pop(guild.id, None)
 
 
 def main():

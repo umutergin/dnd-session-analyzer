@@ -61,6 +61,21 @@ class DiskWaveSink(sinks.Sink):
         self._t0 = time.monotonic()
         self._lock = threading.Lock()
         self._streams: dict[int, list] = {}  # user_id -> [file, bytes_written]
+        self.paused = False
+        self._pause_started = 0.0
+
+    def pause(self) -> None:
+        """Drop incoming audio. Paused time is cut out of every track equally."""
+        with self._lock:
+            if not self.paused:
+                self.paused = True
+                self._pause_started = time.monotonic()
+
+    def resume(self) -> None:
+        with self._lock:
+            if self.paused:
+                self._t0 += time.monotonic() - self._pause_started  # exclude paused time
+                self.paused = False
 
     @property
     def speaker_count(self) -> int:
@@ -71,7 +86,8 @@ class DiskWaveSink(sinks.Sink):
             return {uid: st[1] for uid, st in self._streams.items()}
 
     def _elapsed_bytes(self) -> int:
-        elapsed = int((time.monotonic() - self._t0) * self.BYTES_PER_SECOND)
+        now = self._pause_started if self.paused else time.monotonic()
+        elapsed = int((now - self._t0) * self.BYTES_PER_SECOND)
         return elapsed - (elapsed % self.FRAME_BYTES)
 
     def _pad_to(self, stream: list, target: int) -> None:
@@ -83,7 +99,7 @@ class DiskWaveSink(sinks.Sink):
             missing -= len(chunk)
 
     def write(self, data, user) -> None:
-        if user is None or getattr(self, "finished", False):
+        if user is None or self.paused or getattr(self, "finished", False):
             return
         pcm = getattr(data, "pcm", data)
         uid = getattr(user, "id", user)
@@ -345,8 +361,8 @@ class SessionRecorder:
         if session.is_paused:
             raise ValueError("Recording is already paused.")
 
-        if session.voice_client:
-            session.voice_client.stop_recording()
+        if session.sink:
+            session.sink.pause()  # keep the voice client recording; the sink drops audio
             session.is_paused = True
             logger.info("Recording paused", session_id=session.session_id)
             return True
@@ -362,8 +378,8 @@ class SessionRecorder:
         if not session.is_paused:
             raise ValueError("Recording is not paused.")
 
-        if session.voice_client and session.sink:
-            session.voice_client.start_recording(session.sink)
+        if session.sink:
+            session.sink.resume()
             session.is_paused = False
             logger.info("Recording resumed", session_id=session.session_id)
             return True
