@@ -21,6 +21,8 @@ x-app: &app
       condition: service_healthy
     redis:
       condition: service_healthy
+    init-db:
+      condition: service_completed_successfully
   logging:
     driver: json-file
     options: {max-size: "10m", max-file: "3"}
@@ -52,6 +54,16 @@ services:
       timeout: 5s
       retries: 5
     mem_limit: 128m
+
+  # One-shot: creates tables / adds new columns (safe to run on every start).
+  init-db:
+    <<: *app
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "scripts/init_db.py"]
+    mem_limit: 256m
 
   bot:
     <<: *app
