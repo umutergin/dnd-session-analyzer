@@ -5,6 +5,7 @@
 #   docker compose -f docker-compose.prod.yml up -d --build
 
 x-app: &app
+  image: dnd-recorder:latest
   build: .
   restart: unless-stopped
   env_file: .env
