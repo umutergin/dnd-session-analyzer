@@ -11,6 +11,7 @@ from src.recorder.session_recorder import SessionRecorder
 from src.database.connection import AsyncSessionLocal
 from src.database.models import Session, SessionAudioTrack, SessionSummary
 from src.processing.tasks import process_session
+from src.services import character_service
 
 logger = structlog.get_logger()
 
@@ -336,6 +337,66 @@ class Recording(commands.Cog):
             await ctx.respond("Recording resumed!")
         except ValueError as e:
             await ctx.respond(str(e), ephemeral=True)
+
+    character = dnd.create_subgroup("character", "Who plays which character (optional)")
+
+    @character.command(name="set", description="Say which character a player plays")
+    async def character_set(
+        self,
+        ctx: discord.ApplicationContext,
+        player: discord.Option(discord.Member, "The player"),
+        character: discord.Option(str, "Character name"),
+        char_class: discord.Option(str, "Class, e.g. Wizard", name="class", required=False) = None,
+        race: discord.Option(str, "Race, e.g. Tiefling", required=False) = None,
+    ):
+        async with AsyncSessionLocal() as db:
+            m = await character_service.set_character(
+                db, ctx.guild_id, player.id, character, char_class, race
+            )
+        await ctx.respond(f"{player.display_name} plays **{character_service.describe(m)}**.")
+
+    @character.command(name="dm", description="Mark a player as the DM")
+    async def character_dm(
+        self,
+        ctx: discord.ApplicationContext,
+        player: discord.Option(discord.Member, "The DM"),
+    ):
+        async with AsyncSessionLocal() as db:
+            await character_service.set_character(
+                db, ctx.guild_id, player.id, character_service.DM_LABEL, is_dm=True
+            )
+        await ctx.respond(f"{player.display_name} is the **DM**.")
+
+    @character.command(name="remove", description="Forget a player's character")
+    async def character_remove(
+        self,
+        ctx: discord.ApplicationContext,
+        player: discord.Option(discord.Member, "The player"),
+    ):
+        async with AsyncSessionLocal() as db:
+            removed = await character_service.remove_character(db, ctx.guild_id, player.id)
+        if removed:
+            await ctx.respond(f"Removed {player.display_name}.")
+        else:
+            await ctx.respond(f"{player.display_name} had no character set.", ephemeral=True)
+
+    @character.command(name="list", description="Show who plays which character")
+    async def character_list(self, ctx: discord.ApplicationContext):
+        async with AsyncSessionLocal() as db:
+            rows = await character_service.list_characters(db, ctx.guild_id)
+        if not rows:
+            await ctx.respond(
+                "No characters set. This is optional: without it I work out who plays whom "
+                "from the conversation. Use `/dnd character set` to be exact.",
+                ephemeral=True,
+            )
+            return
+        lines = []
+        for m in rows:
+            member = ctx.guild.get_member(m.discord_user_id)
+            name = member.display_name if member else f"<@{m.discord_user_id}>"
+            lines.append(f"**{name}**: {character_service.describe(m)}")
+        await ctx.respond("\n".join(lines))
 
     @dnd.command(name="session", description="View a past session's summary")
     async def view_session(

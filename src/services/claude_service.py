@@ -16,6 +16,9 @@ You will receive a transcript with speaker labels (labeled as Speaker A, Speaker
 ## Language
 First decide which language the players mostly speak (for example Turkish or English). Write EVERY free-text field of your answer (summaries, descriptions, outcomes, significance notes) in that language. Players often mix in English game terms; keep these in their original English form, as the table does, and never translate them: dice and rolls (d20, d6, natural 20, advantage, disadvantage), mechanics (spell attack, saving throw, save DC, AC, HP, initiative, proficiency, concentration, short rest, long rest), and spell, monster, item, class and feat names (Fireball, Hold Person, Rogue, Sneak Attack). Do not translate or alter proper names of characters, NPCs and places. Write natural grammar in the chosen language around the English terms (for Turkish, for example, "Fireball büyüsü", "save DC 15", "d20 attı").
 
+## Who plays whom
+Speaker labels are the players' names. Where a character was set for a player, the transcript label reads "Name (Character)" and the Cast list in the task says so; treat those as certain. For every other speaker, work out which character they play from the conversation, but only when it is clear: they speak in first person as the character, the DM addresses a character by name and that player answers, or players refer to each other by character name. If it is not clear, do not guess: refer to the character by name alone, or to the player by their name. The DM voices NPCs and narrates; do not attribute NPCs to players. In the summary, describe what characters did by character name, adding the player in brackets the first time it matters or when it is unclear, for example "Leon (Umut) cast Polymorph". Never invent a character for a speaker.
+
 ## Scope: the game only
 Include only what happened in the game: the story and the fiction, in-character dialogue, exploration, social scenes, combat, loot, quests, and rules rulings that actually affected what happened. Leave out everything else, and do not mention that it was left out: real-life conversation (family, work, school, food, news, jokes unrelated to the game), scheduling, breaks, tech problems, and general banter. If a stretch of the transcript is out-of-game talk, ignore it completely. If you cannot tell whether something happened in the game, omit it unless it clearly changed the game state.
 
@@ -24,10 +27,14 @@ Respond ONLY with valid JSON matching the schema provided. Do not include any te
 SESSION_SUMMARY_USER = """## Session Transcript
 {transcript}
 
+## Cast (set by the group, certain)
+{roster}
+
 ## Task
 Analyze this D&D session transcript and extract the following (game content only, in the table's language, keeping English game terms as described):
 
 1. **Language**: the language the players mostly speak (ISO 639-1 code, e.g. "tr" or "en")
+   **Cast**: which player plays which character, from the Cast list above or inferred from the conversation (leave out anyone you cannot tell)
 2. **Session Summary**: 2-3 sentence overview
 3. **Detailed Summary**: Narrative paragraph (200-400 words)
 4. **Key Events**: Major plot points, discoveries, decisions
@@ -39,6 +46,9 @@ Analyze this D&D session transcript and extract the following (game content only
 ```json
 {{
   "language": "tr",
+  "cast": [
+    {{"player": "Player name", "character": "Character name", "source": "set or inferred"}}
+  ],
   "short_summary": "2-3 sentence overview",
   "detailed_summary": "Full narrative summary paragraph",
   "key_events": [
@@ -112,12 +122,14 @@ class ClaudeService:
         self,
         transcript: str,
         model: Optional[str] = None,
+        roster: str = "",
     ) -> AnalysisResult:
         """
         Analyze a session transcript and extract summary and entities.
 
         Args:
             transcript: The full transcript text
+            roster: Optional "player: character" lines set by the group
             model: Optional model override
 
         Returns:
@@ -153,7 +165,10 @@ class ClaudeService:
             messages=[
                 {
                     "role": "user",
-                    "content": SESSION_SUMMARY_USER.format(transcript=transcript),
+                    "content": SESSION_SUMMARY_USER.format(
+                        transcript=transcript,
+                        roster=roster or "(none set; work it out from the conversation)",
+                    ),
                 }
             ],
             betas=["server-side-fallback-2026-07-01"],
@@ -185,6 +200,7 @@ class ClaudeService:
         logger.info(
             "Session analysis completed",
             language=result.get("language"),
+            cast=result.get("cast"),
             prompt_tokens=message.usage.input_tokens,
             completion_tokens=message.usage.output_tokens,
         )
