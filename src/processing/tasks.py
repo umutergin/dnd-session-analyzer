@@ -12,6 +12,10 @@ from src.database.connection import SyncSessionLocal
 from src.database.models import Session, SessionAudioTrack, Transcript, SessionSummary
 from src.services.assemblyai_service import AssemblyAIService
 from src.services.claude_service import ClaudeService
+from src.services.character_service import (
+    roster_for_session_sync,
+    describe as describe_character,
+)
 
 logger = structlog.get_logger()
 
@@ -540,18 +544,37 @@ def analyze_transcript(self, transcript_id: str, session_id: str) -> str:
         # Format transcript with speaker labels for analysis
         formatted_transcript = transcript.full_text
 
+        # Optional player -> character mapping set with /dnd character (empty if unset)
+        session_row = db.query(Session).filter(Session.id == session_id).first()
+        roster = roster_for_session_sync(db, session_row.guild_id) if session_row else {}
+        name_to_user = {
+            t.discord_username: t.discord_user_id
+            for t in db.query(SessionAudioTrack).filter(SessionAudioTrack.session_id == session_id)
+        }
+        labels = {}  # speaker name -> "Name (Character)" for players with a mapping
+        roster_lines = []
+        for name, user_id in name_to_user.items():
+            m = roster.get(user_id)
+            if m:
+                labels[name] = f"{name} ({'DM' if m.is_dm else m.character_name})"
+                roster_lines.append(
+                    f"- {name}: {'the DM' if m.is_dm else describe_character(m)}"
+                )
+        roster_text = "\n".join(roster_lines)
+
         if transcript.utterances:
             # Use utterance format with speaker labels
             lines = []
             for utterance in transcript.utterances:
                 speaker = utterance.get("speaker", "Unknown")
+                speaker = labels.get(speaker, speaker)
                 text = utterance.get("text", "")
                 lines.append(f"{speaker}: {text}")
             formatted_transcript = "\n".join(lines)
 
     # Analyze with Claude
     service = ClaudeService()
-    result = service.analyze_session(formatted_transcript)
+    result = service.analyze_session(formatted_transcript, roster=roster_text)
 
     # Store summary in database
     with SyncSessionLocal() as db:
