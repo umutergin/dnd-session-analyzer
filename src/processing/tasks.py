@@ -23,6 +23,18 @@ DISCORD_API_BASE = "https://discord.com/api/v10"
 DISCORD_FILE_SIZE_LIMIT = 8 * 1024 * 1024  # 8 MB
 
 
+def _delete_session_audio(audio_dir: str) -> None:
+    """Remove a session's audio folder, but only if it is inside the managed storage path."""
+    import shutil
+    root = settings.audio_storage_path.resolve()
+    target = Path(audio_dir).resolve()
+    if root in target.parents:
+        shutil.rmtree(target, ignore_errors=True)
+        logger.info("Deleted session audio", path=str(target))
+    else:
+        logger.warning("Refusing to delete audio outside storage path", path=str(target))
+
+
 @celery_app.task(bind=True, max_retries=3)
 def process_session(self, session_id: str):
     """
@@ -809,6 +821,7 @@ def send_discord_notification(self, session_id: str, channel_id: int):
         if not session:
             logger.error("Session not found for notification", session_id=session_id)
             return
+        audio_dir = session.audio_directory
 
         summary = db.query(SessionSummary).filter(
             SessionSummary.session_id == session_id
@@ -898,6 +911,8 @@ def send_discord_notification(self, session_id: str, channel_id: int):
             session_id=session_id,
             channel_id=channel_id,
         )
+        if settings.delete_audio_after_report and audio_dir:
+            _delete_session_audio(audio_dir)
     except httpx.HTTPStatusError as e:
         logger.error(
             "Failed to send Discord notification",

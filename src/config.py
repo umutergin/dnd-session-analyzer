@@ -25,6 +25,9 @@ class Settings(BaseSettings):
 
     # Storage
     audio_storage_path: Path = Field(default=Path("./data/audio"))
+    # Delete a session's audio folder once its report was posted to Discord (saves disk on
+    # small servers). Leave off if you want to keep the recordings.
+    delete_audio_after_report: bool = Field(default=False)
 
     # Logging
     log_level: str = Field(default="INFO")
